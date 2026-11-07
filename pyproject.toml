@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "embed-cache"
+version = "0.1.0"
+description = "Content-addressed embedding cache: re-index a corpus without paying to embed it twice."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "aiplusplus360" }]
+keywords = ["embeddings", "cache", "rag", "sqlite", "vector", "deduplication"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+embedcache = "embedcache.cli:main"
+
+[tool.setuptools]
+packages = ["embedcache"]

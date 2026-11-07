@@ -1,0 +1,135 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install
+        run: python -m pip install --upgrade pip && python -m pip install -e .
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Re-indexing costs nothing
+        run: |
+          python - <<'PY'
+          import tempfile
+          from pathlib import Path
+
+          from embedcache import EmbeddingCache, SqliteStore, hashing_embedder
+
+          calls = []
+          def embedder(texts):
+              calls.extend(texts)
+              return hashing_embedder(32)(texts)
+
+          with tempfile.TemporaryDirectory() as tmp:
+              db = str(Path(tmp) / "c.db")
+              chunks = [f"chunk {i} about billing retries" for i in range(50)]
+              with EmbeddingCache(SqliteStore(db), "model-a", embedder) as cache:
+                  cache.embed(chunks)
+                  assert len(calls) == 50, len(calls)
+                  cache.embed(chunks)
+                  assert len(calls) == 50, "re-index called the embedder again"
+
+                  edited = chunks[:25] + [f"chunk {i} about refunds" for i in range(3)] + chunks[28:]
+                  cache.embed(edited)
+                  assert len(calls) == 53, f"an edit of 3 chunks cost {len(calls) - 50}"
+                  print("50 indexed, 0 re-embedded, 3 after editing 3 chunks")
+          PY
+
+      - name: A vector never crosses models
+        run: |
+          python - <<'PY'
+          import tempfile
+          from pathlib import Path
+
+          from embedcache import EmbeddingCache, SqliteStore, hashing_embedder
+
+          with tempfile.TemporaryDirectory() as tmp:
+              db = str(Path(tmp) / "c.db")
+              with EmbeddingCache(SqliteStore(db), "a", hashing_embedder(8)) as cache:
+                  cache.embed(["same text"])
+              with EmbeddingCache(SqliteStore(db), "b", hashing_embedder(8)) as cache:
+                  cache.embed(["same text"])
+              with SqliteStore(db) as store:
+                  assert store.count() == 2, "identical text shared a row across models"
+              print("two models, two rows")
+          PY
+
+      - name: A hit is bit-identical, not approximately equal
+        run: |
+          python - <<'PY'
+          from embedcache import EmbeddingCache, SqliteStore, hashing_embedder
+
+          with EmbeddingCache(SqliteStore(), "m", hashing_embedder(16)) as cache:
+              first = cache.embed(["alpha"])[0]
+              second = cache.embed(["alpha"])[0]
+          assert first == second, "cached vector differs from the original"
+          print("exact match")
+          PY
+
+      - name: A failed batch writes nothing
+        run: |
+          python - <<'PY'
+          import tempfile
+          from pathlib import Path
+
+          from embedcache import EmbeddingCache, SqliteStore
+
+          def exploding(texts):
+              raise RuntimeError("provider is down")
+
+          with tempfile.TemporaryDirectory() as tmp:
+              db = str(Path(tmp) / "c.db")
+              try:
+                  with EmbeddingCache(SqliteStore(db), "m", exploding) as cache:
+                      cache.embed(["a", "b"])
+              except RuntimeError:
+                  pass
+              else:
+                  raise AssertionError("a failed batch must not be swallowed")
+              with SqliteStore(db) as store:
+                  assert store.count() == 0, "a failed batch left rows behind"
+              print("nothing written")
+          PY
+
+      - name: Case is part of the identity
+        run: |
+          python - <<'PY'
+          from embedcache import key_for
+
+          assert key_for("Hello") != key_for("hello"), "case was collapsed into one key"
+          assert key_for("a b") == key_for("  a   b  "), "whitespace was not normalised"
+          print("normalisation is conservative")
+          PY
+
+      - name: CLI round trip
+        run: |
+          embedcache --db cli.db embed --model demo "hello world" > /dev/null
+          embedcache --db cli.db embed --model demo "hello world" \
+            | python -c "import json,sys; assert json.load(sys.stdin)['stats']['hits'] == 1"
+          embedcache --db cli.db stats | python -c "import json,sys; assert json.load(sys.stdin)['entries'] == 1"
+          embedcache --db cli.db purge | python -c "import json,sys; assert json.load(sys.stdin)['removed'] == 1"
+          rm -f cli.db cli.db-wal cli.db-shm
+          echo "embed -> stats -> purge ok"
